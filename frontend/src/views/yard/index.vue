@@ -7,7 +7,9 @@
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记箱区</button>
-        <button class="btn" type="button" @click="exportRows">导出堆场管理清单</button>
+        <button class="btn" type="button" :disabled="exporting" @click="exportRows">
+          {{ exporting ? '正在导出…' : '导出堆场管理清单' }}
+        </button>
       </div>
     </header>
 
@@ -19,9 +21,16 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>箱区编号</span>
+        <input v-model="keyword" placeholder="按箱区编号检索" />
+      </label>
+      <label class="filter-item">
+        <span>箱区状态</span>
+        <select v-model="status">
+          <option value="">全部状态</option>
+          <option v-for="item in statuses" :key="item" :value="item">{{ item }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -57,6 +66,11 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条堆场管理记录</span>
+      <span v-if="exportNotice" class="notice-text">{{ exportNotice }}</span>
+      <span v-if="exportError" class="error-text">
+        {{ exportError }}
+        <button class="link" type="button" @click="exportRows">重试导出</button>
+      </span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -78,16 +92,59 @@ const stats = [{"label": "在用箱区", "value": 0}, {"label": "接近满载箱
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const keyword = ref('')
+const status = ref('')
+const exporting = ref(false)
+const exportError = ref('')
+const exportNotice = ref('')
+
+function buildQuery(): string {
+  const params = new URLSearchParams()
+  if (keyword.value.trim()) {
+    params.set('keyword', keyword.value.trim())
+  }
+  if (status.value) {
+    params.set('status', status.value)
+  }
+  return params.toString()
+}
 
 function resetFilters() {
-  filters.value = {}
+  keyword.value = ''
+  status.value = ''
   void reload()
 }
 
-function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+async function exportRows() {
+  // 导出按当前筛选条件取数；失败时条件保留在原处，点“重试导出”即可再来一次
+  exporting.value = true
+  exportError.value = ''
+  exportNotice.value = ''
+  try {
+    const query = buildQuery()
+    const response = await request(`${ENDPOINT}/export${query ? `?${query}` : ''}`)
+    if (!response.ok) {
+      throw new Error(`导出接口返回 ${response.status}，清单未生成`)
+    }
+    const payload = await response.json()
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `箱区台账-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    const mismatched = (payload.mismatched ?? []) as Row[]
+    exportNotice.value = mismatched.length
+      ? `已导出 ${payload.total ?? 0} 条；其中 ${mismatched.length} 条箱位与堆放层数对不上：${mismatched.map((row) => row['箱区编号']).join('、')}`
+      : `已导出 ${payload.total ?? 0} 条箱区记录，箱位与堆放层数全部对得上`
+  } catch (error) {
+    exportError.value = error instanceof Error ? `导出失败：${error.message}` : '导出失败，请重试'
+  } finally {
+    exporting.value = false
+  }
 }
 
 function openCreate() {
@@ -112,9 +169,9 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = buildQuery()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${query ? `?${query}` : ''}`)
     if (!response.ok) {
       throw new Error('箱区列表读取失败')
     }
@@ -128,3 +185,8 @@ async function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.notice-text { color: #b54708; }
+.page-foot { gap: 12px; align-items: center; }
+</style>

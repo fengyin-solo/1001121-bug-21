@@ -30,6 +30,28 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按箱区编号检索"),
+    status: str | None = Query(default=None, description="待启用、正常堆放、接近满载、已封闭"),
+) -> dict[str, Any]:
+    """导出堆场管理清单：按当前过滤条件取数，与列表同一口径。
+
+    箱区编号重复的只留一条；已用箱位与可用箱位加起来超过堆放层数的记录
+    单独放在 mismatched 里，不混在正常清单中核对。
+    注意：本路由必须声明在 /{entry_id} 之前，否则 "export" 会被当成编号抢走。
+    """
+    items, total = service.list_entries(keyword=keyword, status=status, page=1, size=10000)
+    mismatched = service.capacity_mismatches(keyword=keyword, status=status)
+    return {
+        "module": "yard",
+        "total": total,
+        "items": items,
+        "mismatched": mismatched,
+        "mismatched_total": len(mismatched),
+    }
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条箱区明细；不存在时给出可读的错误说明。"""
@@ -41,10 +63,10 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条箱区，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+    """登记一条箱区，缺字段或箱区编号重复时说明原因而不是静默丢弃。"""
+    entry, error = service.create_entry(payload.values)
+    if error:
+        return ActionResult(ok=False, message=error)
     return ActionResult(ok=True, message="箱区已登记", entry=entry)
 
 
@@ -56,10 +78,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出堆场管理清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "yard", "total": total, "items": items}
