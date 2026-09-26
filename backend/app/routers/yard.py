@@ -1,4 +1,4 @@
-"""堆场管理接口：维护箱区，覆盖启用箱区、封闭箱区、腾空箱区等动作。"""
+"""堆场管理（箱区台账）接口：维护箱区，覆盖启用、封闭、腾空等动作，并按当前条件取数导出。"""
 from __future__ import annotations
 
 from typing import Any
@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.yard import YardService
+from app.services.yard import CLOSED_STATUS, STATUS_ORDER, YardService
 
 router = APIRouter(prefix="/api/yard", tags=["堆场管理"])
 
@@ -16,18 +16,63 @@ LIST_FIELDS = ["箱区编号", "箱区名称", "堆放层数", "可用箱位", "
 STATUSES = ["待启用", "正常堆放", "接近满载", "已封闭"]
 
 
+def _check_status(status: str | None) -> None:
+    if status and status not in STATUS_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"箱区状态仅支持：{'、'.join(STATUS_ORDER)}",
+        )
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按箱区编号检索"),
     status: str | None = Query(default=None, description="待启用、正常堆放、接近满载、已封闭"),
+    include_closed: bool = Query(default=False, description="是否包含已封闭箱区"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按箱区编号与状态过滤堆场管理列表；没有数据时返回空页，不报错。"""
+    """按箱区编号与状态过滤箱区台账；封闭箱区默认隐藏，结果去重并标注箱位异常。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    _check_status(status)
+    items, total, anomalies, summary = service.list_entries(
+        keyword=keyword,
+        status=status,
+        include_closed=include_closed,
+        page=page,
+        size=size,
+    )
+    return PageResult(
+        items=items,
+        total=total,
+        page=page,
+        size=size,
+        anomalies=anomalies,
+        summary=summary,
+    )
+
+
+# 注意：导出路由必须放在 /{entry_id} 之前，否则 "export" 会被当成箱区 id 解析并报 422。
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按箱区编号检索，与列表一致"),
+    status: str | None = Query(default=None, description="待启用、正常堆放、接近满载、已封闭"),
+    include_closed: bool = Query(default=False, description="是否包含已封闭箱区"),
+) -> dict[str, Any]:
+    """按当前筛选条件导出：与列表共用同一取数口径，重复箱区只留一条，异常记录单独成段。"""
+    _check_status(status)
+    entries = service.query_entries(keyword=keyword, status=status, include_closed=include_closed)
+    anomalies = [row for row in entries if row.get("箱位异常")]
+    summary = service.summarize(entries)
+    return {
+        "module": "yard",
+        "total": len(entries),
+        "items": entries,
+        "anomalies": anomalies,
+        "summary": summary,
+        "filters": {"keyword": keyword or "", "status": status or "", "include_closed": include_closed},
+    }
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +101,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出堆场管理清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "yard", "total": total, "items": items}

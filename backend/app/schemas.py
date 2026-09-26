@@ -13,6 +13,9 @@ class PageResult(BaseModel, Generic[T]):
     total: int
     page: int = 1
     size: int = 20
+    # 当前条件下的全量异常记录与汇总数字；与 items 同源，供列表高亮与卡片展示。
+    anomalies: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
 
 
 class ActionResult(BaseModel):
